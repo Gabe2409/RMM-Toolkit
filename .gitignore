@@ -1,0 +1,8 @@
+# Local tooling / planning output, not part of the toolkit
+graphify-out/
+tasks/
+
+# Run output if someone points -OutputRoot here
+*_triage_*/
+*_sc-cleanup_*/
+*_sc-verify_*/

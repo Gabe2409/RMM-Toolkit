@@ -1,0 +1,63 @@
+{
+  "_comment": "Indicators that are not tied to one RMM vendor. Extend freely. Regex is case-insensitive.",
+  "version": "2026.10.09",
+
+  "hidingToolFiles": [
+    "^HideUL(_x64)?\\.exe$",
+    "^HideUL\\.ini$",
+    "^HideUL.*\\.zip$",
+    "^Hide.?From.?Uninstall.*",
+    "^Sordum.*"
+  ],
+
+  "suspiciousDropFileNames": [
+    "\\.(exe|msi|zip|bat|cmd|ps1|vbs|js|hta|lnk)$"
+  ],
+
+  "suspiciousDropLocations": [
+    "C:\\Users",
+    "C:\\Users\\Public",
+    "C:\\Users\\Public\\Downloads",
+    "C:\\ProgramData",
+    "C:\\"
+  ],
+
+  "lureFileNames": [
+    "invit", "invitation", "paperless", "evite", "rsvp", "e-?card", "party", "event",
+    "statement", "invoice", "document", "docusign", "secure.?message", "voicemail",
+    "captcha", "verify", "update", "support", "setup", "access", "client"
+  ],
+
+  "suspiciousCommandPatterns": [
+    "-enc(odedcommand)?\\s",
+    "-e\\s+[A-Za-z0-9+/=]{40,}",
+    "FromBase64String",
+    "DownloadString|DownloadFile|DownloadData",
+    "Invoke-WebRequest|\\biwr\\b|Invoke-RestMethod|\\birm\\b",
+    "\\biex\\b|Invoke-Expression",
+    "-w(indowstyle)?\\s+h(idden)?",
+    "mshta(\\.exe)?\\s+https?:",
+    "\\bcurl(\\.exe)?\\s+.*https?:",
+    "bitsadmin.*/transfer",
+    "msiexec(\\.exe)?\\s+.*/i\\s*https?:",
+    "certutil.*-urlcache",
+    "rundll32(\\.exe)?\\s+.*\\\\(Users|ProgramData|AppData|Temp|Public)\\\\.*\\.dll",
+    "rundll32(\\.exe)?\\s+\\S+,\\s*#\\d+",
+    "regsvr32.*/i:https?:",
+    "\\\\AppData\\\\(Local|Roaming)\\\\Temp\\\\.*\\.(ps1|vbs|js|bat|cmd)"
+  ],
+
+  "scriptHosts": [
+    "powershell", "pwsh", "cmd.exe", "wscript", "cscript", "mshta", "rundll32", "regsvr32", "msiexec", "certutil", "bitsadmin"
+  ],
+
+  "expectedLsaAuthenticationPackages": ["msv1_0"],
+
+  "knownBadHosts": [
+    "_comment: add callback hostnames from confirmed incidents here, one per string, exact match or regex"
+  ],
+
+  "trustedTenantHosts": [
+    "_comment: add your OWN legitimate ScreenConnect/RMM relay hostnames here so they are reported as expected rather than suspicious. Exact hostname or wildcard (*.mymsp.com) only - NOT regex"
+  ]
+}
