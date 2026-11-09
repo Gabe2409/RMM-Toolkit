@@ -438,6 +438,129 @@ function Get-ScheduledTaskInventory {
             Created  = $created
             Actions  = $actions
             IsMicrosoft = ($t.TaskPath -like '\Microsoft\*')
+            NetworkTrigger = @($t.Triggers | Where-Object { $_ -and $_.CimClass.CimClassName -eq 'MSFT_TaskEventTrigger' -and (Test-NetworkEventTrigger $_.Subscription) }).Count -gt 0
+            WaitsForNetwork = [bool]$t.Settings.RunOnlyIfNetworkAvailable
+        }
+    }
+}
+
+function Test-NetworkEventTrigger {
+    # True when a task's event subscription fires on network connect (Wi-Fi joined, internet detected, DHCP lease)
+    param([string]$Subscription)
+    return $Subscription -match 'Microsoft-Windows-(NetworkProfile|NCSI|WLAN-AutoConfig|Dhcp)'
+}
+
+function Get-NetworkTriggeredServices {
+    # Services Windows starts when the PC gets an IP address (SERVICE_TRIGGER_TYPE_IP_ADDRESS_AVAILABILITY = 2)
+    foreach ($key in (Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Services' -ErrorAction SilentlyContinue)) {
+        $info = Join-Path $key.PSPath 'TriggerInfo'
+        if (-not (Test-Path -LiteralPath $info)) { continue }
+        $types = @(Get-ChildItem -LiteralPath $info -ErrorAction SilentlyContinue | ForEach-Object { (Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue).Type })
+        if ($types -contains 2) { $key.PSChildName }
+    }
+}
+
+function Test-WinlogonValue {
+    # Shell / Userinit replaced = a full-screen blocker or backdoor runs at every logon instead of the desktop
+    param([string]$Name, [string]$Value)
+    $v = $Value.Trim()
+    if ($Name -eq 'Shell') { return $v -match '^([A-Za-z]:\\Windows\\)?explorer(\.exe)?$' }
+    return $v -match '^([A-Za-z]:\\Windows\\system32\\)?userinit(\.exe)?,?$'
+}
+
+function Get-LogonHijackEntries {
+    # Winlogon Shell/Userinit that aren't the Windows defaults, and any IFEO "Debugger" redirect
+    $keys = @('HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon')
+    Get-ChildItem 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^S-1-5-21-[\d-]+$' } |
+        ForEach-Object { $keys += "Registry::HKEY_USERS\$($_.PSChildName)\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" }
+    foreach ($k in $keys) {
+        $p = Get-ItemProperty -Path $k -ErrorAction SilentlyContinue
+        if (-not $p) { continue }
+        foreach ($n in 'Shell', 'Userinit') {
+            $prop = $p.PSObject.Properties[$n]
+            if ($prop -and $prop.Value -and -not (Test-WinlogonValue $n ([string]$prop.Value))) {
+                [pscustomobject]@{ Kind = 'Winlogon'; Name = $n; Value = [string]$prop.Value; Location = $k }
+            }
+        }
+    }
+    $ifeo = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options'
+    foreach ($s in (Get-ChildItem -Path $ifeo -ErrorAction SilentlyContinue)) {
+        $d = (Get-ItemProperty -LiteralPath $s.PSPath -ErrorAction SilentlyContinue).PSObject.Properties['Debugger']
+        if ($d -and $d.Value) { [pscustomobject]@{ Kind = 'IFEO'; Name = $s.PSChildName; Value = [string]$d.Value; Location = $s.Name } }
+    }
+}
+
+function Get-CommandTargetPath {
+    # The file a command line really runs. For script hosts (powershell, wscript, rundll32...) that is the script/DLL it is handed.
+    param([string]$Command)
+    if (-not $Command) { return '' }
+    $c = [Environment]::ExpandEnvironmentVariables($Command.Trim()) -replace '^\\\?\?\\', '' -replace '^\\SystemRoot\\', "$env:SystemRoot\"
+    $p = if ($c -match '^"([^"]+)"') { $Matches[1] }
+         elseif ($c -match '^(.+?\.(exe|com|scr|bat|cmd|ps1|vbs|vbe|js|jse|hta|msi|dll|sys))(?=[\s,]|$)') { $Matches[1] }
+         else { ($c -split '\s')[0] }
+    if (($p -replace '.*\\', '') -match '^(powershell|pwsh|cmd|wscript|cscript|mshta|rundll32|regsvr32)(\.exe)?$') {
+        $rest = $c.Substring($c.IndexOf($p) + $p.Length)
+        if ($rest -match '([A-Za-z]:\\[^"|<>*?]+?\.(ps1|vbs|vbe|js|jse|bat|cmd|hta|dll|exe))(?=["\s,]|$)') { return $Matches[1] }
+    }
+    return $p
+}
+
+function Get-AutostartRating {
+    # Pure decision: how worrying is this auto-starting file? Severity '' = nothing to report.
+    param([string]$Path, [datetime]$Created, [string]$SignatureStatus, [datetime]$Since)
+    $inWindows = $Path -match '^[A-Za-z]:\\Windows\\' -and $Path -notmatch '^[A-Za-z]:\\Windows\\Temp\\'
+    $standard  = $inWindows -or $Path -match '^[A-Za-z]:\\Program Files( \(x86\))?\\'
+    $unsigned  = $SignatureStatus -ne 'Valid'
+    $sev = ''; $why = ''
+    if ($Created -ge $Since) {
+        if ($unsigned) { $sev = 'Medium'; $why = 'added recently and not signed' }
+        elseif (-not $inWindows) { $sev = 'Low'; $why = 'added recently' }
+    } elseif ($unsigned -and -not $standard) { $sev = 'Medium'; $why = 'not signed, in a user-writable folder' }
+    [pscustomobject]@{ Severity = $sev; Why = $why; Standard = $standard }
+}
+
+function Get-FileFacts {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf -ErrorAction SilentlyContinue)) { return $null }
+    $i = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $i) { return $null }
+    $s = Get-SignatureSummary $Path
+    [pscustomobject]@{ Created = $i.CreationTime; Status = $s.Status; Signer = $s.Signer }
+}
+
+function Get-RecentProgramFiles {
+    # Programs and scripts created since -Since in the places malware drops them (bounded depth, known-noisy trees skipped)
+    param([datetime]$Since, [string[]]$NamePatterns, [string]$ExcludePattern, [int]$Depth = 3, [int]$MaxResults = 300)
+    $roots = @("$env:ProgramData", 'C:\Users\Public', "$env:SystemRoot\Temp")
+    foreach ($u in (Get-ChildItem 'C:\Users' -Directory -Force -ErrorAction SilentlyContinue)) {
+        foreach ($sub in 'Roaming', 'Local', 'LocalLow') { $roots += Join-Path $u.FullName "AppData\$sub" }
+    }
+    $n = 0
+    foreach ($r in $roots) {
+        if (-not (Test-Path -LiteralPath $r -ErrorAction SilentlyContinue)) { continue }
+        foreach ($f in (Get-ChildItem -LiteralPath $r -Recurse -Depth $Depth -File -Force -ErrorAction SilentlyContinue)) {
+            if ($f.CreationTime -lt $Since -or $f.FullName -match $ExcludePattern -or -not (Test-PatternMatch -Text $f.Name -Patterns $NamePatterns)) { continue }
+            $s = Get-SignatureSummary $f.FullName
+            [pscustomobject]@{ Path = $f.FullName; Folder = $f.DirectoryName; Name = $f.Name; Created = $f.CreationTime; Signature = $s.Status; Signer = $s.Signer }
+            if (++$n -ge $MaxResults) { return }
+        }
+    }
+}
+
+function Get-RecentOpenedItems {
+    # Files and folders each user opened, from Windows' own Recent shortcuts. Names only; the files are not read.
+    param([datetime]$Since, [int]$MaxResults = 1000)
+    $shell = $null
+    try { $shell = New-Object -ComObject WScript.Shell } catch { }
+    $n = 0
+    foreach ($u in (Get-ChildItem 'C:\Users' -Directory -Force -ErrorAction SilentlyContinue)) {
+        $dir = Join-Path $u.FullName 'AppData\Roaming\Microsoft\Windows\Recent'
+        if (-not (Test-Path -LiteralPath $dir -ErrorAction SilentlyContinue)) { continue }
+        foreach ($l in (Get-ChildItem -LiteralPath $dir -Filter *.lnk -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $Since } | Sort-Object LastWriteTime -Descending)) {
+            $target = ''
+            if ($shell) { try { $target = $shell.CreateShortcut($l.FullName).TargetPath } catch { } }
+            [pscustomobject]@{ User = $u.Name; Item = $l.BaseName; Target = $target; Opened = $l.LastWriteTime }
+            if (++$n -ge $MaxResults) { return }
         }
     }
 }
@@ -554,7 +677,7 @@ function Find-FilesByPattern {
     )
     $found = New-Object System.Collections.Generic.List[object]
     foreach ($r in $Roots) {
-        if (-not (Test-Path -LiteralPath $r)) { continue }
+        if (-not (Test-Path -LiteralPath $r -ErrorAction SilentlyContinue)) { continue }
         $items = Get-ChildItem -LiteralPath $r -Recurse -Depth $Depth -Force -ErrorAction SilentlyContinue
         foreach ($i in $items) {
             if (Test-PatternMatch -Text $i.Name -Patterns $NamePatterns) {

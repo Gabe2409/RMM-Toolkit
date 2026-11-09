@@ -47,7 +47,7 @@ param(
 $ErrorActionPreference = 'Continue'
 Import-Module (Join-Path $PSScriptRoot 'lib\RMMToolkit.Common.psm1') -Force -DisableNameChecking
 
-$ToolkitVersion = '1.0.0'
+$ToolkitVersion = '1.1.0'
 $out    = Initialize-TriageOutput -Root $OutputRoot -Label 'triage'
 $rawDir = Join-Path $out 'raw'; New-Item -ItemType Directory -Path $rawDir -Force | Out-Null
 try { $cfg = Import-ToolkitConfig -ConfigDir (Join-Path $PSScriptRoot 'config') }
@@ -203,9 +203,13 @@ try {
         ForEach-Object {
             $msg = $_.Message -replace '\s+',' '
             $timeline.Add([pscustomobject]@{ Time = $_.TimeCreated; Source = 'ServiceInstall'; Id = 7045; User = ''; Message = $msg })
-            if ((Find-RmmVendor -Signatures $sig -Text @($msg) -Field any) -or (Test-SuspiciousCommand $msg)) {
-                Add-Finding (New-Finding -Category 'Timeline' -Severity 'Medium' -Title ("Service installed {0:yyyy-MM-dd HH:mm}" -f $_.TimeCreated) -Detail $msg)
-            }
+            # 7045 properties: service name, image path, type, start type, account
+            $svcName = [string]$_.Properties[0].Value; $image = [string]$_.Properties[1].Value
+            $facts = Get-FileFacts (Get-CommandTargetPath $image)
+            $rating = if ($facts) { Get-AutostartRating -Path (Get-CommandTargetPath $image) -Created $facts.Created -SignatureStatus $facts.Status -Since $since }
+            $sev = if ((Find-RmmVendor -Signatures $sig -Text @($msg) -Field any) -or (Test-SuspiciousCommand $msg) -or ($rating -and $rating.Severity -eq 'Medium')) { 'Medium' } else { 'Info' }
+            Add-Finding (New-Finding -Category 'NewService' -Severity $sev -Title ("Service added {0:yyyy-MM-dd HH:mm}: {1} -> {2}" -f $_.TimeCreated, $svcName, $image) `
+                -Detail ("Start: {0}; account: {1}; signature: {2}{3}" -f $_.Properties[3].Value, $_.Properties[4].Value, $(if ($facts) { "$($facts.Status) $($facts.Signer)" } else { 'file not found' }), $(if ($rating -and $rating.Why) { "; $($rating.Why)" })))
         }
 } catch { }
 $timeline | Sort-Object Time | Export-Csv -Path (Join-Path $out 'timeline.csv') -NoTypeInformation -Encoding UTF8
@@ -256,6 +260,41 @@ foreach ($c in @($wmi.Consumers)) {
     Add-Finding (New-Finding -Category 'WMI' -Severity 'High' -Title "WMI event consumer: $($c.Name) ($($c.Class))" -Detail $c.Command -Data $c)
 }
 Save-Raw 'persistence' ([pscustomobject]@{ RunKeys = $runKeys; Startup = $startup; Tasks = ($tasks | Where-Object { -not $_.IsMicrosoft }); Wmi = $wmi })
+
+# Everything that starts by itself (logon, schedule, network connect), rated by age, signature and location
+Write-TriageLog '--- Startup and network-launched programs ---'
+$auto = New-Object System.Collections.Generic.List[object]
+foreach ($r in $runKeys) { $auto.Add([pscustomobject]@{ Kind = 'Run key'; Name = $r.Name; Command = $r.Command; Trigger = 'logon' }) }
+foreach ($s in $startup) { $auto.Add([pscustomobject]@{ Kind = 'Startup folder'; Name = $s.Name; Command = $(if ($s.Target) { $s.Target } else { "`"$(Join-Path $s.Location $s.Name)`"" }); Trigger = 'logon' }) }
+foreach ($t in ($tasks | Where-Object { -not $_.IsMicrosoft -or $_.NetworkTrigger -or $_.Actions -match '\\(Users|ProgramData|Temp)\\' })) {
+    $trig = if ($t.NetworkTrigger) { 'network connect' } elseif ($t.WaitsForNetwork) { 'waits for network' } else { 'schedule/logon' }
+    foreach ($a in ($t.Actions -split ' \|\| ')) { $auto.Add([pscustomobject]@{ Kind = 'Scheduled task'; Name = "$($t.TaskPath)$($t.TaskName)"; Command = $a; Trigger = $trig }) }
+}
+$netServices = @(Get-NetworkTriggeredServices)
+foreach ($s in ($services | Where-Object { $netServices -contains $_.Name })) { $auto.Add([pscustomobject]@{ Kind = 'Service'; Name = $s.Name; Command = $s.PathName; Trigger = 'network connect' }) }
+
+$autoRows = New-Object System.Collections.Generic.List[object]
+foreach ($e in $auto) {
+    $path = Get-CommandTargetPath $e.Command
+    $facts = Get-FileFacts $path
+    $rating = if ($facts) { Get-AutostartRating -Path $path -Created $facts.Created -SignatureStatus $facts.Status -Since $since }
+    $sev = if ($rating) { $rating.Severity } else { '' }; $why = if ($rating) { $rating.Why } else { '' }
+    if ($e.Trigger -eq 'network connect' -and -not $sev -and $e.Kind -ne 'Service' -and $e.Name -notlike '\Microsoft\*') {
+        $sev = if ($facts -and $rating.Standard -and $facts.Status -eq 'Valid') { 'Low' } else { 'Medium' }; $why = 'launches when the network connects'
+    } elseif ($e.Trigger -eq 'network connect' -and $why) { $why += '; launches when the network connects' }
+    if (Test-PatternMatch -Text $e.Command -Patterns @($wl.screenBlockerPatterns)) { $sev = 'High'; $why = 'starts a full-screen or browser-control command' }
+    $autoRows.Add([pscustomobject]@{ Kind = $e.Kind; Name = $e.Name; Trigger = $e.Trigger; Severity = $sev; Why = $why; Path = $path; Created = $(if ($facts) { $facts.Created }); Signature = $(if ($facts) { $facts.Status }); Signer = $(if ($facts) { $facts.Signer }); Command = $e.Command })
+    if ($sev) { Add-Finding (New-Finding -Category 'Autostart' -Severity $sev -Title "$($e.Kind): $($e.Name) ($why)" -Detail $e.Command) }
+}
+$autoRows | Export-Csv -Path (Join-Path $out 'autostart.csv') -NoTypeInformation -Encoding UTF8
+
+foreach ($p in ($processes | Where-Object { $_.CommandLine -and (Test-PatternMatch -Text $_.CommandLine -Patterns @($wl.screenBlockerPatterns)) })) {
+    Add-Finding (New-Finding -Category 'ScreenBlocker' -Severity 'Medium' -Title "Running now: $($p.Name) PID $($p.ProcessId) with a full-screen or browser-control command" -Detail $p.CommandLine)
+}
+foreach ($h in @(Get-LogonHijackEntries)) {
+    $access = $h.Kind -eq 'IFEO' -and $h.Name -match '^(sethc|utilman|osk|magnify|narrator|displayswitch)\.exe$'
+    Add-Finding (New-Finding -Category 'Autostart' -Severity $(if ($h.Kind -eq 'Winlogon' -or $access) { 'High' } else { 'Medium' }) -Title "$($h.Kind) $($h.Name) changed from the Windows default: $($h.Value)" -Detail $h.Location -Data $h)
+}
 
 # ---------------------------------------------------------------------------
 # 5. Accounts + security posture
@@ -315,7 +354,34 @@ if (-not $SkipFileSweep) {
             ForEach-Object { Add-Finding (New-Finding -Category 'Files' -Severity 'Low' -Title "New folder directly under C:\Users: $($_.Name)" -Detail "Created $($_.CreationTime). Could be a new profile or a dropped tool folder.") }
     }
     Save-Raw 'file-sweep' $fileHits
+
+    # New programs/scripts in AppData-style folders; one row per folder so an installer doesn't flood the list
+    $newFiles = @(Get-RecentProgramFiles -Since $since -NamePatterns @($wl.recentProgramFileNames) -ExcludePattern $wl.recentProgramExcludePattern)
+    $newFiles | Export-Csv -Path (Join-Path $out 'recent-programs.csv') -NoTypeInformation -Encoding UTF8
+    foreach ($g in ($newFiles | Where-Object { $_.Signature -ne 'Valid' } | Group-Object Folder)) {
+        Add-Finding (New-Finding -Category 'NewFiles' -Severity 'Low' -Title "$($g.Count) new unsigned program(s) in $($g.Name)" -Detail (($g.Group | Select-Object -First 8 | ForEach-Object { "$($_.Name) ($($_.Created))" }) -join '; '))
+    }
+
+    # Browser password/cookie stores outside the browser's own folder = copied for theft
+    $userDirs = @(Get-ChildItem 'C:\Users' -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+    $stagingRoots = @($userDirs | ForEach-Object { "$_\AppData\Local\Temp"; "$_\Desktop"; "$_\Downloads"; "$_\Documents" }) + @('C:\Users\Public', "$env:ProgramData", "$env:SystemRoot\Temp")
+    foreach ($b in @(Find-FilesByPattern -Roots $stagingRoots -NamePatterns @($wl.browserDataFileNames) -Depth 3 | Where-Object { -not $_.IsFolder })) {
+        Add-Finding (New-Finding -Category 'Snooping' -Severity 'High' -Title "Browser password/cookie data outside the browser: $($b.Path)" -Detail "Created $($b.Created). Typical of a copy made to steal saved logins." -Data $b)
+    }
 }
+
+# Files and folders opened recently. Windows doesn't record who opened them, so anything opened after the remote tool arrived is worth asking about.
+Write-TriageLog '--- Recently opened files and folders ---'
+$opened = @(Get-RecentOpenedItems -Since $since)
+$opened | Export-Csv -Path (Join-Path $out 'recent-opened.csv') -NoTypeInformation -Encoding UTF8
+$remoteSince = @($scInstances | Where-Object { -not (Test-HostListed $_.CallbackHost @($wl.trustedTenantHosts) -Trusted) -and $_.InstallFolder -and (Test-Path -LiteralPath $_.InstallFolder) } |
+    ForEach-Object { (Get-Item -LiteralPath $_.InstallFolder -Force).CreationTime } | Sort-Object | Select-Object -First 1)
+$sensitive = @($opened | Where-Object { Test-PatternMatch -Text "$($_.Item) $($_.Target)" -Patterns @($wl.sensitiveFileNames) })
+foreach ($o in ($sensitive | Select-Object -First 25)) {
+    $after = $remoteSince -and $o.Opened -ge $remoteSince[0]
+    Add-Finding (New-Finding -Category 'Snooping' -Severity $(if ($after) { 'Medium' } else { 'Low' }) -Title ("Sensitive-looking item opened {0:yyyy-MM-dd HH:mm} by {1}'s account: {2}" -f $o.Opened, $o.User, $o.Item) -Detail "$($o.Target)$(if ($after) { ' (after the remote tool was installed)' })")
+}
+if ($opened) { Add-Finding (New-Finding -Category 'Snooping' -Severity 'Info' -Title "$($opened.Count) files/folders opened in the last $RecentDays days; ask the customer about any they don't recognise (recent-opened.csv)") }
 
 # ---------------------------------------------------------------------------
 # 7. Browser indicators (optional)
@@ -433,6 +499,10 @@ $conns = @($rmmConn | ForEach-Object { "PID $($_.OwningProcess) -> $($_.RemoteAd
 [void]$sb.AppendLine('ALL HIGH / MEDIUM FINDINGS')
 foreach ($f in ($high + $medium)) { [void]$sb.AppendLine("  [$($f.Severity)] $($f.Category): $($f.Title)"); if ($f.Detail) { [void]$sb.AppendLine("           $($f.Detail)") } }
 [void]$sb.AppendLine('')
+[void]$sb.AppendLine("SERVICES ADDED IN THE LAST $RecentDays DAYS")
+$newSvc = @($findings | Where-Object Category -eq 'NewService')
+if ($newSvc) { foreach ($f in $newSvc) { [void]$sb.AppendLine("  [$($f.Severity)] $($f.Title)"); [void]$sb.AppendLine("           $($f.Detail)") } } else { [void]$sb.AppendLine('  none') }
+[void]$sb.AppendLine('')
 [void]$sb.AppendLine('RECOMMENDED FOLLOW-UP')
 $rec = New-Object System.Collections.Generic.List[string]
 if ($scInstances | Where-Object { $_.SessionType -eq 'Access' }) {
@@ -448,11 +518,13 @@ if ($remoteHigh) {
     $rec.Add('Check for new local accounts, changed passwords, and browser-saved passwords; consider clearing saved passwords after rotating them.')
     if ($scInstances) { $rec.Add('Report the callback hostname to ConnectWise abuse (ScreenConnect cloud relays can be taken down).') }
 }
+if ($findings | Where-Object { $_.Category -eq 'Snooping' -and $_.Severity -eq 'High' }) { $rec.Add('Browser password data was copied: treat every password saved in the browser as stolen and change them from a clean device.') }
+if ($findings | Where-Object { $_.Category -in 'Autostart','ScreenBlocker' -and $_.Severity -eq 'High' }) { $rec.Add('Something is set to take over the screen or the logon: identify it in autostart.csv and remove it by hand; the cleanup script only removes ScreenConnect.') }
 if ($high) { $rec.Add('Run a full Defender (or equivalent) scan and an offline scan after cleanup.') }
 if (-not $rec.Count) { $rec.Add('No action required based on this scan. Keep this report on file.') }
 foreach ($r in $rec) { [void]$sb.AppendLine("  - $r") }
 [void]$sb.AppendLine('')
-[void]$sb.AppendLine("Files: findings.csv, installed-programs.csv, timeline.csv, technician-log.txt, raw\*.json")
+[void]$sb.AppendLine("Files: findings.csv, autostart.csv, recent-programs.csv, recent-opened.csv, installed-programs.csv, timeline.csv, technician-log.txt, raw\*.json")
 $sb.ToString() | Set-Content -Path (Join-Path $out 'incident-summary.txt') -Encoding UTF8
 
 # Customer-facing plain-language report
@@ -489,6 +561,7 @@ $next = if ($untrusted) { 'Disconnect the network, then run Cleanup dry run.', '
         elseif ($medium) { 'Review the findings with the customer.', '' }
         else { 'Nothing to do. Keep the report on file.', '' }
 Write-ToolkitResult -Folder $out -Tool Triage -ExitCode $code -Verdict @('Green', 'Amber', 'Red')[$code] `
-    -Instances $scInstances -TrustedHosts @($wl.trustedTenantHosts) -Connections $rmmConn -Findings ($high + $medium) `
+    -Instances $scInstances -TrustedHosts @($wl.trustedTenantHosts) -Connections $rmmConn `
+    -Findings ($high + $medium + @($findings | Where-Object { $_.Severity -in 'Low','Info' -and $_.Category -in 'NewService','Autostart','Snooping','NewFiles' })) `
     -NextStep $next[0] -NextAction $next[1] -SummaryPath (Join-Path $out 'incident-summary.txt')
 exit $code

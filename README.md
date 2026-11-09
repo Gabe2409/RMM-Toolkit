@@ -89,6 +89,9 @@ execution policy overrides `Bypass`; on such machines the scripts won't start.
 - `findings.csv`, `installed-programs.csv`, `timeline.csv` (MSI installs + new services), `browser.csv`
 - `technician-log.txt` — timestamped log of everything
 - `raw\*.json` — full structured data
+- `autostart.csv`: everything that starts by itself (Run keys, Startup folder, tasks, services started on network connect) with trigger, signature and age
+- `recent-programs.csv`: programs and scripts created in the look-back window in AppData, ProgramData, Public and Windows\Temp
+- `recent-opened.csv`: files and folders Windows recorded as opened in the window, per user account (names only; the files are not read)
 - cleanup runs add `actions.csv`, `cleanup-summary.txt`, `evidence\`
 - `result.json`: a short result the window reads (verdict, instances, live connections, top findings,
   next step). Every triage, cleanup and verify run writes one.

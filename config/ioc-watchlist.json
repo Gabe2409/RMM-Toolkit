@@ -1,6 +1,6 @@
 {
   "_comment": "Indicators that are not tied to one RMM vendor. Extend freely. Regex is case-insensitive.",
-  "version": "2026.10.09",
+  "version": "2026.11.09",
 
   "hidingToolFiles": [
     "^HideUL(_x64)?\\.exe$",
@@ -49,6 +49,29 @@
 
   "scriptHosts": [
     "powershell", "pwsh", "cmd.exe", "wscript", "cscript", "mshta", "rundll32", "regsvr32", "msiexec", "certutil", "bitsadmin"
+  ],
+
+  "_screenBlockerComment": "Full-screen blockers and browser abuse: a browser forced full-screen or fed a remote-control/extension flag, or an HTA page.",
+  "screenBlockerPatterns": [
+    "(chrome|msedge|brave|firefox)(\\.exe)?[\"']?\\s.*--?(kiosk|start-fullscreen|app=https?:|remote-debugging-port|load-extension)",
+    "mshta(\\.exe)?[\"']?\\s",
+    "\\.hta\\b",
+    "fake.?(windows.?)?update"
+  ],
+
+  "recentProgramFileNames": [
+    "\\.(exe|scr|msi|bat|cmd|ps1|vbs|vbe|hta)$"
+  ],
+  "recentProgramExcludePattern": "\\\\(node_modules|Packages|WindowsApps|Package Cache|Microsoft\\\\(Installer|Windows|Edge|EdgeUpdate|Teams|OneDrive|Windows Defender)|Google\\\\Chrome|Windows Defender)\\\\",
+
+  "browserDataFileNames": [
+    "^Login Data( For Account)?$",
+    "^key4\\.db$"
+  ],
+
+  "sensitiveFileNames": [
+    "passw", "bank", "statement", "\\btax", "wallet", "seed.?phrase", "recovery.?(code|key)",
+    "\\bssn\\b", "social.?security", "credit.?card", "\\.kdbx", "payroll", "w-?2\\b"
   ],
 
   "expectedLsaAuthenticationPackages": ["msv1_0"],

