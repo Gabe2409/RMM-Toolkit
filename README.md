@@ -76,10 +76,10 @@ execution policy overrides `Bypass`; on such machines the scripts won't start.
 | 1 | Evidence | IOC CSV, `reg export` of service/uninstall/LSA keys, SHA256 + signature of every file, config/log copies, ScreenConnect event-log entries, zip of install folders. |
 | 2 | Contain | Service set to **Disabled** then stopped (so recovery actions can't respawn it), then leftover `ScreenConnect.*` processes ended. |
 | 3 | Uninstall | `msiexec /x {code} /qn /norestart` with verbose log. Product code from the Uninstall key, or from `Installer\Products` if the entry was hidden. Never executes arbitrary uninstall strings. |
-| 4 | Orphaned services | `sc delete` for any `ScreenConnect*` service still in scope. |
+| 4 | Services | `sc delete` for each targeted service still present (by exact name, so renamed services are caught) and any other `ScreenConnect*` service in scope. Services the uninstaller already removed are logged as such. |
 | 5 | Remnants | Scheduled tasks (XML exported first), Run values, Startup shortcuts. |
 | 6 | LSA | Prints all three LSA package lists. A leftover ScreenConnect entry is **reported only** unless you pass `-RemoveLsaEntry`, which removes just that token, requires `msv1_0` to remain, and is backed up in step 1. |
-| 7 | Folders | Only folders named `ScreenConnect*` under Program Files, ProgramData, systemprofile or C:\Users. System32 ScreenConnect DLLs are kept while still LSA-registered. |
+| 7 | Folders | Only folders named `ScreenConnect*` under Program Files, ProgramData, Windows\Temp, C:\Users or the SYSTEM profiles (System32 and SysWOW64 `config\systemprofile`): AppData Local, Roaming and Temp. System32/SysWOW64 ScreenConnect DLLs are kept while still LSA-registered. |
 | 8 | Verify | Full rescan; PASS/ITEMS REMAIN in `cleanup-summary.txt`. |
 
 ## Output (`C:\Users\Public\RMM-Triage\<PC>_<mode>_<timestamp>\`)

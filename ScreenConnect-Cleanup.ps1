@@ -297,8 +297,14 @@ foreach ($code in ($productCodes | Select-Object -Unique)) {
 # ---------------------------------------------------------------------------
 # 4. Orphaned services
 # ---------------------------------------------------------------------------
-Write-TriageLog '--- 4. Orphaned services ---'
-$svcNow = @(Get-ServiceInventory | Where-Object { $_.Name -match '^ScreenConnect' -and (Test-InScope $_.Name $ClientId) })
+Write-TriageLog '--- 4. Services ---'
+# Targeted services by exact name (catches renamed ones) plus any ScreenConnect* service in scope
+$targetSvcNames = @($targets | ForEach-Object { $_.ServiceName } | Where-Object { $_ })
+$svcNow = @(Get-ServiceInventory | Where-Object { ($targetSvcNames -contains $_.Name) -or ($_.Name -match '^ScreenConnect' -and (Test-InScope $_.Name $ClientId)) })
+foreach ($n in $targetSvcNames) {
+    if (-not ($svcNow | Where-Object Name -eq $n)) { Add-Action 'Service' $n 'Removed (already gone after uninstall)' }
+}
+if (-not $svcNow) { Write-TriageLog 'No ScreenConnect services left to delete.' -Level OK }
 foreach ($s in $svcNow) {
     if (Approve-Step $s.Name 'Delete service') {
         try { Stop-Service -Name $s.Name -Force -ErrorAction SilentlyContinue } catch { }
@@ -382,7 +388,7 @@ foreach ($valueName in 'Authentication Packages','Security Packages','Notificati
 # 7. Folders (+ System32 copies of the auth package once unregistered)
 # ---------------------------------------------------------------------------
 Write-TriageLog '--- 7. Folders ---'
-$allowedRoots = @(${env:ProgramFiles}, ${env:ProgramFiles(x86)}, $env:ProgramData, "$env:SystemRoot\System32\config\systemprofile", "$env:SystemRoot\SysWOW64\config\systemprofile", 'C:\Users') | Where-Object { $_ }
+$allowedRoots = @(${env:ProgramFiles}, ${env:ProgramFiles(x86)}, $env:ProgramData, "$env:SystemRoot\System32\config\systemprofile", "$env:SystemRoot\SysWOW64\config\systemprofile", "$env:SystemRoot\Temp", 'C:\Users') | Where-Object { $_ }
 foreach ($f in $inScopeFolders) {
     if (-not (Test-Path -LiteralPath $f)) { Add-Action 'Folder' $f 'already gone'; continue }
     $leaf = Split-Path -Leaf $f

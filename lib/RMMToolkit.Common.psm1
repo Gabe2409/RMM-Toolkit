@@ -694,16 +694,18 @@ function Find-FilesByPattern {
 }
 
 function Get-ScreenConnectFolders {
-    $roots = @(${env:ProgramFiles}, ${env:ProgramFiles(x86)}, $env:ProgramData,
-               "$env:SystemRoot\System32\config\systemprofile\AppData\Local",
-               "$env:SystemRoot\SysWOW64\config\systemprofile\AppData\Local") | Where-Object { $_ }
-    Get-ChildItem 'C:\Users' -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
-        $roots += Join-Path $_.FullName 'AppData\Local'
-        $roots += Join-Path $_.FullName 'AppData\Roaming'
-        $roots += Join-Path $_.FullName 'AppData\Local\Apps\2.0'   # ClickOnce-deployed clients
+    $roots = @(${env:ProgramFiles}, ${env:ProgramFiles(x86)}, $env:ProgramData, "$env:SystemRoot\Temp") | Where-Object { $_ }
+    # The 32-bit client service runs as SYSTEM, so its profile data lands under SysWOW64\config\systemprofile
+    $profiles = @("$env:SystemRoot\System32\config\systemprofile", "$env:SystemRoot\SysWOW64\config\systemprofile") +
+                @(Get-ChildItem 'C:\Users' -Directory -Force -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+    foreach ($p in $profiles) {
+        $roots += Join-Path $p 'AppData\Local'
+        $roots += Join-Path $p 'AppData\Roaming'
+        $roots += Join-Path $p 'AppData\Local\Temp'      # extracted client copies (Temp\ScreenConnect\<version>)
+        $roots += Join-Path $p 'AppData\Local\Apps\2.0'  # ClickOnce-deployed clients
     }
     foreach ($r in ($roots | Select-Object -Unique)) {
-        if (-not (Test-Path -LiteralPath $r)) { continue }
+        if (-not (Test-Path -LiteralPath $r -ErrorAction SilentlyContinue)) { continue }
         Get-ChildItem -LiteralPath $r -Directory -Force -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match '^ScreenConnect' } |
             Select-Object -ExpandProperty FullName
