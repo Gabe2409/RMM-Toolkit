@@ -47,7 +47,7 @@ param(
 $ErrorActionPreference = 'Continue'
 Import-Module (Join-Path $PSScriptRoot 'lib\RMMToolkit.Common.psm1') -Force -DisableNameChecking
 
-$ToolkitVersion = '1.1.0'
+$ToolkitVersion = '1.2.0'
 $out    = Initialize-TriageOutput -Root $OutputRoot -Label 'triage'
 $rawDir = Join-Path $out 'raw'; New-Item -ItemType Directory -Path $rawDir -Force | Out-Null
 try { $cfg = Import-ToolkitConfig -ConfigDir (Join-Path $PSScriptRoot 'config') }
